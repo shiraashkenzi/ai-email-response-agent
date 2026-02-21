@@ -35,6 +35,7 @@ def get_gmail_token_path() -> str:
 
     Returns:
         Path string; defaults to 'token.json' if GMAIL_TOKEN_PATH is not set.
+        Path is relative to project root when used by the app.
     """
     return os.getenv("GMAIL_TOKEN_PATH", "token.json")
 
@@ -44,6 +45,7 @@ def get_gmail_credentials_path() -> str:
 
     Returns:
         Path string; defaults to 'credentials.json' if not set.
+        Path is relative to project root when used by the app.
     """
     return os.getenv("GMAIL_CREDENTIALS_PATH", "credentials.json")
 

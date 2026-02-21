@@ -12,13 +12,13 @@ class LLMService:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gpt-4",
+        model: str = "gpt-4o-mini",
     ) -> None:
         """Initialize the LLM client.
 
         Args:
             api_key: OpenAI API key; if None, uses OPENAI_API_KEY from environment.
-            model: Model name (e.g. gpt-4, gpt-3.5-turbo).
+            model: Model name (e.g. gpt-4o-mini, gpt-4o, gpt-4).
 
         Raises:
             ValueError: If no API key is available.
@@ -72,8 +72,8 @@ class LLMService:
                 temperature=0.7,
                 max_tokens=max_tokens,
             )
-            reply = response.choices[0].message.content.strip()
-            return reply
+            content = response.choices[0].message.content
+            return (content or "").strip()
         except RateLimitError as e:
             raise LLMError(f"OpenAI API rate limit exceeded: {str(e)}") from e
         except APIConnectionError as e:
@@ -184,8 +184,8 @@ Please provide an improved version of the reply."""
                 temperature=0.7,
                 max_tokens=500,
             )
-            improved_reply = response.choices[0].message.content.strip()
-            return improved_reply
+            content = response.choices[0].message.content
+            return (content or "").strip()
         except RateLimitError as e:
             raise LLMError(f"OpenAI API rate limit exceeded: {str(e)}") from e
         except APIConnectionError as e:

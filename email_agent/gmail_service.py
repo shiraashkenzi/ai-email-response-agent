@@ -27,6 +27,26 @@ GMAIL_SCOPES = [
 ]
 
 
+def build_subject_query(keywords: str) -> str:
+    """Build a Gmail search query string from subject/keywords.
+
+    Multi-word keywords are wrapped in quotes (subject:"..."); single-word
+    uses subject:word. Use the result with GmailService.search_emails().
+
+    Args:
+        keywords: Search terms (e.g. "project proposal", "meeting").
+
+    Returns:
+        Gmail query string (e.g. subject:"project proposal" or subject:meeting).
+    """
+    s = (keywords or "").strip()
+    if not s:
+        return "subject:"
+    if " " in s:
+        return f'subject:"{s}"'
+    return f"subject:{s}"
+
+
 class GmailService:
     """Service for Gmail API: search, get, parse, send, and draft operations."""
 
@@ -99,9 +119,11 @@ class GmailService:
             Full message dict from Gmail API.
 
         Raises:
+            GmailError: If message_id is empty or API call fails.
             EmailNotFoundError: If the message does not exist.
-            GmailError: If the API call fails.
         """
+        if not (message_id and str(message_id).strip()):
+            raise GmailError("message_id must be non-empty.")
         try:
             service = self._get_service()
             message = (
@@ -452,6 +474,10 @@ def authenticate_gmail(
             print("✓ Authorization successful! Token has all required scopes")
         with open(absolute_token_path, "w") as token_file:
             token_file.write(creds.to_json())
+        try:
+            os.chmod(absolute_token_path, 0o600)
+        except OSError:
+            pass
         print(f"✓ Token saved to {absolute_token_path}\n")
 
     if creds:

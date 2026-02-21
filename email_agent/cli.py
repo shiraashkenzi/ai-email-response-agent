@@ -7,6 +7,7 @@ from email_agent.gmail_service import (
     EmailNotFoundError,
     GmailError,
     GmailService,
+    build_subject_query,
 )
 from email_agent.llm_service import LLMError, LLMService
 
@@ -75,6 +76,13 @@ class CLI:
             return s[idx:].strip() or s
         return s
 
+    @staticmethod
+    def _ensure_re_subject(subject: str) -> str:
+        """Ensure subject has Re: prefix for a reply. Idempotent."""
+        if not subject or subject.startswith("Re:") or subject.startswith("RE:"):
+            return subject or ""
+        return f"Re: {subject}"
+
     def _run_guided_flow(self) -> bool:
         """Run one full cycle: search → list → preview → draft → send/draft.
 
@@ -134,10 +142,7 @@ class CLI:
             for the displayed results; None on error (caller may continue).
         """
         try:
-            if " " in query.strip():
-                gmail_query = f'subject:"{query}"'
-            else:
-                gmail_query = f"subject:{query}"
+            gmail_query = build_subject_query(query)
             messages = self._gmail.search_emails(gmail_query, max_results=MAX_SEARCH_RESULTS)
         except GmailError as e:
             print(f"Search failed: {e}")
@@ -162,8 +167,8 @@ class CLI:
                 subject = (parsed.get("subject") or "(No subject)")[:60]
                 date = parsed.get("date") or ""
                 print(f"{len(entries)}. From: {from_} | Subject: {subject} | Date: {date} (id: {msg_id})")
-            except (GmailError, EmailNotFoundError):
-                pass  # Skip failed items so displayed numbers match selection indices
+            except (GmailError, EmailNotFoundError) as e:
+                logger.debug("Skip message %s: %s", msg_id, e)
 
         if not entries:
             return []
@@ -301,8 +306,6 @@ class CLI:
             if raw in ("save as draft", "draft", "d", "save"):
                 return self._do_save_draft(parsed_email, reply_body)
             print("Please enter: yes, modify, or save as draft.")
-            print()
-            print(PROMPT_SEND_OPTIONS)
 
     def _do_send_reply(
         self,
@@ -310,9 +313,7 @@ class CLI:
         body: str,
     ) -> bool:
         """Send the reply via Gmail. Prints success or error. Returns True to continue."""
-        subject = parsed_email.get("subject") or ""
-        if not subject.startswith("Re:") and not subject.startswith("RE:"):
-            subject = f"Re: {subject}"
+        subject = self._ensure_re_subject(parsed_email.get("subject") or "")
         thread_id = parsed_email.get("thread_id") or ""
         message_id_header = parsed_email.get("message_id_header")
         references = parsed_email.get("references") or ""
@@ -332,6 +333,7 @@ class CLI:
             return True
         except GmailError as e:
             print(f"Failed to send reply: {e}")
+            print("You can try again or start a new search.")
             return True
 
     def _do_modify_reply(self, current_reply: str) -> Optional[str]:
@@ -355,9 +357,7 @@ class CLI:
         body: str,
     ) -> bool:
         """Save reply as Gmail draft. Returns True to continue."""
-        subject = parsed_email.get("subject") or ""
-        if not subject.startswith("Re:") and not subject.startswith("RE:"):
-            subject = f"Re: {subject}"
+        subject = self._ensure_re_subject(parsed_email.get("subject") or "")
         thread_id = parsed_email.get("thread_id") or ""
 
         try:

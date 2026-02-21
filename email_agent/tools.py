@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from email_agent.gmail_service import GmailService
+from email_agent.gmail_service import GmailService, build_subject_query
 from email_agent.llm_service import LLMService
 
 
@@ -19,10 +19,7 @@ class Tool:
 
 def _build_search_emails(gmail: GmailService) -> Tool:
     def handler(query: str, max_results: int = 10) -> List[Dict[str, Any]]:
-        if " " in query.strip():
-            gmail_query = f'subject:"{query}"'
-        else:
-            gmail_query = f"subject:{query}"
+        gmail_query = build_subject_query(query)
         return gmail.search_emails(gmail_query, max_results=max_results)
 
     return Tool(

@@ -42,6 +42,7 @@ def main() -> None:
     token_path = get_gmail_token_path()
     credentials_path = get_gmail_credentials_path()
     model = get_openai_model()
+    logger.info("Starting AI Email Response Agent")
 
     try:
         print("🔐 Authenticating with Gmail...")
