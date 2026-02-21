@@ -1,11 +1,14 @@
-"""Gmail Service Module - Handles all Gmail API operations."""
+"""Gmail service module: Gmail API operations, OAuth, and message handling."""
 
 import base64
+import logging
 import os
 import re
-from pathlib import Path
+import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import parseaddr
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from google.oauth2.credentials import Credentials as GoogleCredentials
@@ -14,6 +17,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError as GoogleHttpError
 
+logger = logging.getLogger(__name__)
 
 # Gmail API OAuth scopes required
 GMAIL_SCOPES = [
@@ -24,149 +28,235 @@ GMAIL_SCOPES = [
 
 
 class GmailService:
-    """Service for interacting with Gmail API"""
-    
-    def __init__(self, credentials: GoogleCredentials):
-        """Initialize Gmail service with credentials"""
+    """Service for Gmail API: search, get, parse, send, and draft operations."""
+
+    def __init__(self, credentials: GoogleCredentials) -> None:
+        """Initialize with OAuth credentials.
+
+        Args:
+            credentials: Valid Google OAuth2 credentials with Gmail scopes.
+        """
         self.credentials = credentials
-        self._service = None
-    
-    def _get_service(self):
-        """Get authenticated Gmail service instance, refreshing if needed"""
+        self._service: Any = None
+
+    def _get_service(self) -> Any:
+        """Return authenticated Gmail API service, refreshing token if expired.
+
+        Returns:
+            Gmail API users().messages() resource (googleapiclient Resource).
+        """
         if self.credentials.expired and self.credentials.refresh_token:
             self.credentials.refresh(Request())
         if self._service is None:
-            self._service = build('gmail', 'v1', credentials=self.credentials)
+            self._service = build("gmail", "v1", credentials=self.credentials)
         return self._service
-    
-    def search_emails(self, query: str, max_results: int = 10) -> List[Dict[str, Any]]:
-        """
-        Search for emails matching the query
-        
+
+    def search_emails(
+        self, query: str, max_results: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Search for emails matching the given Gmail query.
+
         Args:
-            query: Gmail search query (e.g., "subject:meeting")
-            max_results: Maximum number of results to return
-            
+            query: Gmail search query (e.g. "subject:meeting").
+            max_results: Maximum number of messages to return.
+
         Returns:
-            List of email message dictionaries with id and threadId
-            
+            List of message dicts with 'id' and 'threadId'.
+
         Raises:
-            GoogleHttpError: If Gmail API call fails
+            GmailError: If the API call fails.
         """
         try:
             service = self._get_service()
-            results = service.users().messages().list(
-                userId='me',
-                q=query,
-                maxResults=max_results
-            ).execute()
-            messages = results.get('messages', [])
+            results = (
+                service.users()
+                .messages()
+                .list(
+                    userId="me",
+                    q=query,
+                    maxResults=max_results,
+                )
+                .execute()
+            )
+            messages = results.get("messages", [])
             if messages is None:
                 messages = []
             return messages
         except GoogleHttpError as e:
-            raise GmailError(f"Failed to search emails: {e.error_details if hasattr(e, 'error_details') else str(e)}") from e
+            raise GmailError(
+                f"Failed to search emails: {e.error_details if hasattr(e, 'error_details') else str(e)}"
+            ) from e
         except Exception as e:
             raise GmailError(f"Unexpected error searching emails: {str(e)}") from e
-    
+
     def get_email(self, message_id: str) -> Dict[str, Any]:
-        """
-        Get full email details by message ID
-        
+        """Fetch full email message by ID.
+
         Args:
-            message_id: Gmail message ID
-            
+            message_id: Gmail message ID.
+
         Returns:
-            Full email message dictionary
-            
+            Full message dict from Gmail API.
+
         Raises:
-            GmailError: If email not found or API call fails
+            EmailNotFoundError: If the message does not exist.
+            GmailError: If the API call fails.
         """
         try:
             service = self._get_service()
-            message = service.users().messages().get(
-                userId='me',
-                id=message_id,
-                format='full'
-            ).execute()
+            message = (
+                service.users()
+                .messages()
+                .get(userId="me", id=message_id, format="full")
+                .execute()
+            )
             return message
         except GoogleHttpError as e:
             if e.resp.status == 404:
-                raise EmailNotFoundError(f"Email with ID {message_id} not found")
-            raise GmailError(f"Failed to get email: {e.error_details if hasattr(e, 'error_details') else str(e)}") from e
-    
-    def parse_email(self, message: Dict[str, Any]) -> Dict[str, str]:
-        """
-        Parse email message into readable format
-        
+                raise EmailNotFoundError(
+                    f"Email with ID {message_id} not found"
+                ) from e
+            raise GmailError(
+                f"Failed to get email: {e.error_details if hasattr(e, 'error_details') else str(e)}"
+            ) from e
+
+    def parse_email(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse a Gmail API message into a flat dict for display and reply.
+
         Args:
-            message: Full email message dictionary from Gmail API
-            
+            message: Full message dict from get_email.
+
         Returns:
-            Dictionary with 'from', 'to', 'subject', 'body', 'date', 'message_id', 'thread_id'
+            Dict with keys: from, to, subject, body, date, message_id, thread_id,
+            message_id_header, references, in_reply_to.
         """
-        headers = message.get('payload', {}).get('headers', [])
-        
+        headers = message.get("payload", {}).get("headers", [])
+
         def get_header(name: str) -> str:
             for header in headers:
-                if header['name'].lower() == name.lower():
-                    return header['value']
-            return ''
-        
-        from_addr = get_header('From')
-        to_addr = get_header('To')
-        subject = get_header('Subject')
-        date = get_header('Date')
-        message_id_header = get_header('Message-ID')
-        references = get_header('References')
-        in_reply_to = get_header('In-Reply-To')
-        
-        # Extract body
-        body = self._extract_body(message.get('payload', {}))
-        
+                if header["name"].lower() == name.lower():
+                    return header["value"]
+            return ""
+
+        from_addr = get_header("From")
+        to_addr = get_header("To")
+        subject = get_header("Subject")
+        date = get_header("Date")
+        message_id_header = get_header("Message-ID")
+        references = get_header("References")
+        in_reply_to = get_header("In-Reply-To")
+
+        body = self._extract_body(message.get("payload", {}))
+
         return {
-            'from': from_addr,
-            'to': to_addr,
-            'subject': subject,
-            'body': body,
-            'date': date,
-            'message_id': message.get('id', ''),
-            'thread_id': message.get('threadId', ''),
-            'message_id_header': message_id_header,
-            'references': references,
-            'in_reply_to': in_reply_to,
+            "from": from_addr,
+            "to": to_addr,
+            "subject": subject,
+            "body": body,
+            "date": date,
+            "message_id": message.get("id", ""),
+            "thread_id": message.get("threadId", ""),
+            "message_id_header": message_id_header,
+            "references": references,
+            "in_reply_to": in_reply_to,
         }
-    
+
     def _extract_body(self, payload: Dict[str, Any]) -> str:
-        """Extract email body from payload"""
+        """Extract plain-text body from a Gmail message payload.
+
+        Args:
+            payload: Message payload dict (may have 'parts' or direct body).
+
+        Returns:
+            Decoded and stripped body text; HTML is stripped to text.
+        """
         body = ""
-        
-        if 'parts' in payload:
-            for part in payload['parts']:
-                if part['mimeType'] == 'text/plain':
-                    data = part['body'].get('data', '')
+
+        if "parts" in payload:
+            for part in payload["parts"]:
+                part_body = part.get("body") or {}
+                if part.get("mimeType") == "text/plain":
+                    data = part_body.get("data", "")
                     if data:
-                        body = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+                        body = base64.urlsafe_b64decode(data).decode(
+                            "utf-8", errors="ignore"
+                        )
                         break
-                elif part['mimeType'] == 'text/html' and not body:
-                    data = part['body'].get('data', '')
+                elif part.get("mimeType") == "text/html" and not body:
+                    data = part_body.get("data", "")
                     if data:
-                        html_body = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
-                        # Simple HTML to text conversion
-                        body = re.sub(r'<[^>]+>', '', html_body)
+                        html_body = base64.urlsafe_b64decode(data).decode(
+                            "utf-8", errors="ignore"
+                        )
+                        body = re.sub(r"<[^>]+>", "", html_body)
         else:
-            if payload.get('mimeType') == 'text/plain':
-                data = payload['body'].get('data', '')
+            top_body = payload.get("body") or {}
+            if payload.get("mimeType") == "text/plain":
+                data = top_body.get("data", "")
                 if data:
-                    body = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
-            elif payload.get('mimeType') == 'text/html':
-                data = payload['body'].get('data', '')
+                    body = base64.urlsafe_b64decode(data).decode(
+                        "utf-8", errors="ignore"
+                    )
+            elif payload.get("mimeType") == "text/html":
+                data = top_body.get("data", "")
                 if data:
-                    html_body = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
-                    body = re.sub(r'<[^>]+>', '', html_body)
-        
+                    html_body = base64.urlsafe_b64decode(data).decode(
+                        "utf-8", errors="ignore"
+                    )
+                    body = re.sub(r"<[^>]+>", "", html_body)
+
         return body.strip()
-    
+
+    def _build_reply_message(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        reply_to_email: Optional[Dict[str, Any]] = None,
+        message_id_header: Optional[str] = None,
+        references_header: Optional[str] = None,
+    ) -> str:
+        """Build a MIME reply message and return its base64-encoded raw body.
+
+        Extracts and validates recipient using parseaddr; preserves threading
+        headers (In-Reply-To, References). Does not set threadId (caller adds it to API payload).
+
+        Args:
+            to: Ignored for recipient; kept for API compatibility.
+            subject: Subject line (caller may add Re: for send_reply).
+            body: Plain-text body.
+            reply_to_email: Required parsed original email; recipient is taken from "from" only.
+            message_id_header: Optional Message-ID for In-Reply-To / References.
+            references_header: Optional References header value.
+
+        Returns:
+            Base64-encoded raw message string for Gmail API.
+
+        Raises:
+            GmailError: If reply_to_email is missing or no valid recipient can be determined.
+        """
+        if not reply_to_email or not isinstance(reply_to_email, dict):
+            raise GmailError(
+                "reply_to_email is required: the parsed email object (with 'from') must be provided."
+            )
+        from_val = reply_to_email.get("from")
+        to_email = self._normalize_recipient(from_val)
+        if not to_email or "@" not in to_email:
+            raise GmailError(
+                "Invalid or missing recipient: reply_to_email must contain a valid 'from' address."
+            )
+        message = MIMEMultipart()
+        message["to"] = to_email
+        message["subject"] = subject
+        if message_id_header:
+            if references_header:
+                message["References"] = f"{references_header} {message_id_header}"
+            else:
+                message["References"] = message_id_header
+            message["In-Reply-To"] = message_id_header
+        message.attach(MIMEText(body, "plain"))
+        return base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+
     def send_reply(
         self,
         thread_id: str,
@@ -174,131 +264,141 @@ class GmailService:
         subject: str,
         body: str,
         message_id_header: Optional[str] = None,
-        references_header: Optional[str] = None
+        references_header: Optional[str] = None,
+        reply_to_email: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        Send a reply email
-        
+        """Send a reply in the given thread with proper threading headers.
+
         Args:
-            thread_id: Thread ID to reply to
-            to: Recipient email address
-            subject: Email subject (will add "Re: " if not present)
-            body: Email body text
-            message_id_header: Original message ID for threading
-            references_header: References header for threading
-            
+            thread_id: Gmail thread ID.
+            to: Recipient email address (fallback if reply_to_email not provided).
+            subject: Subject line (Re: prefix added if missing).
+            body: Plain-text body.
+            message_id_header: Message-ID of the message being replied to.
+            references_header: References header for threading.
+            reply_to_email: Optional parsed original email; if provided, To is taken from its "from" field.
+
         Returns:
-            Sent message dictionary
-            
+            Sent message dict from Gmail API.
+
         Raises:
-            GmailError: If sending fails
+            GmailError: If send fails or no valid recipient (To) can be determined.
         """
+        if not subject.startswith("Re:") and not subject.startswith("RE:"):
+            subject = f"Re: {subject}"
+        raw = self._build_reply_message(
+            to=to,
+            subject=subject,
+            body=body,
+            reply_to_email=reply_to_email,
+            message_id_header=message_id_header,
+            references_header=references_header,
+        )
         try:
             service = self._get_service()
-            
-            # Ensure subject has "Re: " prefix
-            if not subject.startswith('Re:') and not subject.startswith('RE:'):
-                subject = f"Re: {subject}"
-            
-            # Create message
-            message = MIMEMultipart()
-            message['to'] = to
-            message['subject'] = subject
-            
-            # Add threading headers
-            if message_id_header:
-                if references_header:
-                    message['References'] = f"{references_header} {message_id_header}"
-                else:
-                    message['References'] = message_id_header
-                message['In-Reply-To'] = message_id_header
-            
-            message.attach(MIMEText(body, 'plain'))
-            
-            # Encode as base64url
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-            
-            # Send
-            sent_message = service.users().messages().send(
-                userId='me',
-                body={'raw': raw, 'threadId': thread_id}
-            ).execute()
-            
+            api_start = time.perf_counter()
+            sent_message = (
+                service.users()
+                .messages()
+                .send(userId="me", body={"raw": raw, "threadId": thread_id})
+                .execute()
+            )
+            api_elapsed_ms = (time.perf_counter() - api_start) * 1000
+            logger.debug("Gmail API call took %.0f ms (messages.send)", api_elapsed_ms)
             return sent_message
         except GoogleHttpError as e:
-            raise GmailError(f"Failed to send reply: {e.error_details if hasattr(e, 'error_details') else str(e)}") from e
-    
+            raise GmailError(
+                f"Failed to send reply: {e.error_details if hasattr(e, 'error_details') else str(e)}"
+            ) from e
+
+    def _normalize_recipient(self, value: Any) -> Optional[str]:
+        """Return a valid recipient string (must contain '@'), or None if invalid.
+        Accepts 'email@domain.com' or 'Name <email@domain.com>' from headers.
+        """
+        if value is None:
+            return None
+        s = (str(value)).strip()
+        if not s or "@" not in s:
+            return None
+        _, email_addr = parseaddr(s)
+        email_addr = (email_addr or s).strip()
+        if not email_addr or "@" not in email_addr:
+            return None
+        return email_addr
+
     def create_draft(
         self,
         to: str,
         subject: str,
         body: str,
-        thread_id: Optional[str] = None
+        thread_id: Optional[str] = None,
+        reply_to_email: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        Create a draft email
-        
+        """Create a draft message, optionally in an existing thread.
+
         Args:
-            to: Recipient email address
-            subject: Email subject
-            body: Email body text
-            thread_id: Optional thread ID for threading
-            
+            to: Recipient email address.
+            subject: Subject line.
+            body: Plain-text body.
+            thread_id: Optional thread ID for threading.
+            reply_to_email: Optional parsed email dict; if to is invalid, its "from" is used as recipient.
+
         Returns:
-            Draft message dictionary
-            
+            Draft dict from Gmail API.
+
         Raises:
-            GmailError: If draft creation fails
+            GmailError: If draft creation fails or no valid recipient is available.
         """
+        raw = self._build_reply_message(
+            to=to,
+            subject=subject,
+            body=body,
+            reply_to_email=reply_to_email,
+        )
         try:
             service = self._get_service()
-            
-            message = MIMEMultipart()
-            message['to'] = to
-            message['subject'] = subject
-            message.attach(MIMEText(body, 'plain'))
-            
-            raw = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-            
-            draft_body = {'message': {'raw': raw}}
+            draft_body: Dict[str, Any] = {"message": {"raw": raw}}
             if thread_id:
-                draft_body['message']['threadId'] = thread_id
-            
-            draft = service.users().drafts().create(
-                userId='me',
-                body=draft_body
-            ).execute()
-            
+                draft_body["message"]["threadId"] = thread_id
+            api_start = time.perf_counter()
+            draft = (
+                service.users().drafts().create(userId="me", body=draft_body).execute()
+            )
+            api_elapsed_ms = (time.perf_counter() - api_start) * 1000
+            logger.debug("Gmail API call took %.0f ms (drafts.create)", api_elapsed_ms)
             return draft
         except GoogleHttpError as e:
-            raise GmailError(f"Failed to create draft: {e.error_details if hasattr(e, 'error_details') else str(e)}") from e
+            raise GmailError(
+                f"Failed to create draft: {e.error_details if hasattr(e, 'error_details') else str(e)}"
+            ) from e
 
 
 class GmailError(Exception):
-    """Base exception for Gmail service errors"""
-    pass
+    """Base exception for Gmail service errors."""
 
 
 class EmailNotFoundError(GmailError):
-    """Raised when an email is not found"""
-    pass
+    """Raised when a requested email is not found."""
 
 
-def authenticate_gmail(token_path: str = 'token.json', credentials_path: str = 'credentials.json') -> GoogleCredentials:
-    """
-    Authenticate with Gmail API, handling token refresh and re-authorization
-    
+def authenticate_gmail(
+    token_path: str = "token.json",
+    credentials_path: str = "credentials.json",
+) -> GoogleCredentials:
+    """Authenticate with Gmail API: load or refresh token, or run OAuth flow.
+
     Args:
-        token_path: Path to token file
-        credentials_path: Path to OAuth credentials file
-        
+        token_path: Path to the saved token file (relative to project root).
+        credentials_path: Path to OAuth client JSON (relative to project root).
+
     Returns:
-        Authenticated GoogleCredentials object
-        
+        Valid GoogleCredentials with Gmail scopes.
+
     Raises:
-        FileNotFoundError: If credentials.json is not found
+        FileNotFoundError: If credentials_path file does not exist.
+        ValueError: If token has insufficient scopes after verification.
     """
-    creds: GoogleCredentials | None = None
+    creds: Optional[GoogleCredentials] = None
     needs_auth = False
     required_scopes = set(GMAIL_SCOPES)
     project_root = Path(__file__).resolve().parent.parent
@@ -330,7 +430,7 @@ def authenticate_gmail(token_path: str = 'token.json', credentials_path: str = '
     else:
         print("No token file found. Starting OAuth authorization...\n")
         needs_auth = True
-    
+
     if needs_auth or creds is None:
         if not os.path.exists(absolute_credentials_path):
             raise FileNotFoundError(
@@ -338,13 +438,14 @@ def authenticate_gmail(token_path: str = 'token.json', credentials_path: str = '
                 "Download OAuth 'Desktop app' credentials from Google Cloud and save as credentials.json."
             )
         print(f"Requesting authorization with scopes: {GMAIL_SCOPES}\n")
-        flow = InstalledAppFlow.from_client_secrets_file(absolute_credentials_path, GMAIL_SCOPES)
+        flow = InstalledAppFlow.from_client_secrets_file(
+            absolute_credentials_path, GMAIL_SCOPES
+        )
         creds = flow.run_local_server(port=0)
-        
-        # Verify scopes
+
         new_token_scopes = set(creds.scopes or [])
         if not required_scopes.issubset(new_token_scopes):
-            print(f"⚠️  WARNING: New token missing some scopes!")
+            print("⚠️  WARNING: New token missing some scopes!")
             print(f"   Got: {new_token_scopes}")
             print(f"   Required: {required_scopes}")
         else:
@@ -352,10 +453,11 @@ def authenticate_gmail(token_path: str = 'token.json', credentials_path: str = '
         with open(absolute_token_path, "w") as token_file:
             token_file.write(creds.to_json())
         print(f"✓ Token saved to {absolute_token_path}\n")
-    
-    # Final verification
+
     if creds:
         final_scopes = set(creds.scopes or [])
         if not required_scopes.issubset(final_scopes):
-            raise ValueError("Insufficient Gmail API scopes. Delete token.json and re-run.")
+            raise ValueError(
+                "Insufficient Gmail API scopes. Delete token.json and re-run."
+            )
     return creds
