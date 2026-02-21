@@ -48,3 +48,4 @@ Thumbs.db
 # Memory/conversation data (if generated)
 conversation_memory.json
 *.log
+docs/
